@@ -1,0 +1,1256 @@
+---
+title: "Harnessing Earth’s Bike-Sharing Knowledge for Xanadu’s Future"
+author: Luca Himmelein, Luana Rossi, Nick Schneeberger
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+    code_folding: show
+    fig_width: 6
+    fig_height: 4
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#libraries
+library(ggplot2)    # fancy plots
+library(neuralnet)  # neural network (ANN)
+library(caret)      # cross-validation
+library(skimr)      # descriptive statistics
+library(car)        # testing multi-collinearity
+library(mgcv)
+library(e1071)      # SVM
+library(outliers)   # outlier detection
+library(kableExtra)
+```
+
+# Introduction
+
+The Intergalactic City Planning Department (ICPD) is responsible for designing a sustainable urban infrastructure on the newly colonized planet Xanadu. Chief Officer of Xenotransportational Infrastructure and Planetary Cyclo-Urbanism, Fahrradinand Sternfahrer, is intrigued by Earth's innovative approaches to bike-sharing systems. To develop a similar system on Xanadu, Sternfahrer and his deputees turn their focus specifically to Washington D.C., a city renowned for its successful implementation of such an initiative.
+
+Among the many who were fascinated by the vision of a bike-friendly Xanadu, we - Luana, Luca and Nick, emerged as the chosen emissaries. Endowed with vast experience and understanding of Earth's diverse cycling cultures, we were handpicked by Fahrradinand Sternritter himself to assist in this pivotal mission. Hopefully, our collective wisdom, garnered from countless cycling adventures across Earth, will prove invaluable in decoding Washington D.C.'s bike-sharing data and molding it to suit Xanadu's unique environment. While navigating the challenges of creating a sustainable transport model on an alien planet, our camaraderie, resilience, and shared love for cycling will light us the way, hopefully becoming an enduring symbol of interplanetary cooperation and ecological responsibility.
+
+**Let's pedal towards a sustainable future on Xanadu - together**
+
+------------------------------------------------------------------------
+
+# Data Loading
+
+First, we will load the data. The hourly data set consists of 17 variables and 17379 observations and provides a good foundation for running predictive modelling and machine learning techniques over it.
+
+Data Source: [bike sharing dataset](https://archive.ics.uci.edu/ml/datasets/Bike+Sharing+Dataset)
+
+::: {.fold .o}
+```{r loaddata}
+d.bikes <- read.csv("Dataset/hour.csv",
+                    header=TRUE,
+                    stringsAsFactors = TRUE)
+
+str(d.bikes)
+```
+:::
+
+## Data Description
+
+::: {.fold .o}
+```{r tibble, cache=TRUE, results='asis', echo=FALSE}
+# Create a tibble with variable details
+code_book <- tibble::tribble(
+  ~Variable_Name, ~Type, ~Description,
+  "instant", "integer", "Record index",
+  "dteday", "date", "Date",
+  "season", "integer", "Season (1: Spring, 2: Summer, 3: Fall, 4: Winter)",
+  "yr", "integer", "Year (0: 2011, 1: 2012)",
+  "mnth", "integer", "Month (1 to 12)",
+  "hr", "integer", "Hour (0 to 23)",
+  "holiday", "integer", "Whether day is holiday or not",
+  "weekday", "integer", "Day of the week",
+  "workingday", "integer", "If day is neither weekend nor holiday it's 1, otherwise it's 0",
+  "weathersit", "integer", "Weather situation (1: Clear, Few clouds, Partly cloudy; 2: Mist + Cloudy, Mist + Broken clouds, Mist + Few clouds, Mist; 3: Light Snow, Light Rain + Thunderstorm + Scattered clouds, Light Rain + Scattered clouds; 4: Heavy Rain + Ice Pallets + Thunderstorm + Mist, Snow + Fog)",
+  "temp", "numeric", "Normalized temperature in Celsius. The values are divided to 41 (max)",
+  "atemp", "numeric", "Normalized feeling temperature in Celsius. The values are divided to 50 (max)",
+  "hum", "numeric", "Normalized humidity. The values are divided to 100 (max)",
+  "windspeed", "numeric", "Normalized wind speed. The values are divided to 67 (max)",
+  "casual", "integer", "Count of casual users",
+  "registered", "integer", "Count of registered users",
+  "cnt", "integer", "Count of total rental bikes (sum of casual and registered)"
+)
+
+# Create a formatted table
+table_output <- code_book %>%
+  kable(format = "html", col.names = c("Variable", "Data Type", "Description")) %>%
+  kable_styling() %>%
+  column_spec(1, width = "150px") %>%
+  column_spec(2, width = "120px")
+
+# Print the table
+cat(table_output)
+
+```
+:::
+
+------------------------------------------------------------------------
+
+# Data Pre-Processing {.tabset}
+
+As can be seen in the output, some data transformations are necessary:
+
+-   Convert categorical variables into factors, labelling the different levels\
+-   Delete the variables `instant` and `temp`, since they provide no additional information (`instant`) or are a quasi-duplicate (we will use `atemp` instead of `temp`, relying on the subjective feeling of temperature for our analyses).\
+-   Refactor `seasons`: Currently, January to March are marked as Spring. However, we want the seasons according to the Gregorian calender and will therefore change the factors to mark December to February as Winter.
+
+```{r datatransformation, class.source = 'fold-hide'}
+# convert weekday to factor
+d.bikes$weekday <- factor(d.bikes$weekday, 
+                          labels = c("SUN", "MON", "TUE", "WED", 
+                                     "THU", "FRI", "SAT"))
+
+# convert weathersituation to factor
+d.bikes$weathersit <- factor(d.bikes$weathersit)
+
+
+# change the months for the seasons (in dataset spring is jan-march)
+d.bikes$season <- ifelse(d.bikes$mnth %in% c(12, 1, 2), 1,  # Winter
+                         ifelse(d.bikes$mnth %in% c(3, 4, 5), 2,  # Spring
+                                ifelse(d.bikes$mnth %in% c(6, 7, 8), 3, # Summer
+                                       ifelse(d.bikes$mnth %in% 
+                                                c(9, 10, 11), 4, NA))))# Autumn
+
+# factorize and add labels to season
+d.bikes$season <- factor(d.bikes$season, 
+                         labels = c("Winter", "Spring", "Summer", "Autumn"))
+
+# change year to factor
+d.bikes$yr <- factor(d.bikes$yr, 
+                     labels = c("2011", "2012"))
+
+# change holiday to factor (if holiday = 1)
+d.bikes$holiday <- factor(d.bikes$holiday)
+
+# change holiday to factor (if workingday = 1)
+d.bikes$workingday <- factor(d.bikes$workingday)
+
+# convert date to date data type
+d.bikes$dteday <- as.Date(d.bikes$dteday)
+
+# convert month to factor
+d.bikes$mnth <- factor(d.bikes$mnth, labels = c("JAN", "FEB", "MAR", "APR", 
+                                                "MAY", "JUN", "JUL", "AUG",
+                                                "SEP", "OCT", "NOV", "DEC"))
+
+# delete instant and temp
+d.bikes$instant <- NULL
+d.bikes$temp <- NULL
+```
+
+## Descriptive statistics
+
+::: {.fold .o}
+```{r showskim_foldable}
+skim(d.bikes)
+```
+:::
+
+## Missing Values
+
+As can be seen from the output in the descriptive statistics, none of the variables in our dataset contain missing values. Hence, no handling needed.
+
+## Outliers
+
+There is no evidence that the dataset contains any outliers for `cnt`. Hence, no measures are necessary.
+
+```{r outlierhandling, cache=TRUE}
+# Apply Grubbs' test to identify the outlier
+outlier <- grubbs.test(d.bikes$cnt)
+
+# Print the outlier result
+print(outlier)
+```
+
+# Graphical Analysis
+
+As a first step we want to gain some understanding of the data and the underlying data structures as well as the relationships of the different variables.
+
+## Overview {.tabset}
+
+First, we want to take a look at the destined response variable `cnt`.
+
+### Time Series Plot
+
+We take a first glimpse at the total count of rented bikes in DC. Unsurprisingly, our data shows clear time series behaviour.
+
+```{r timeseries, cache=TRUE}
+# Create the time series plot
+ggplot(d.bikes, aes(x = dteday, y = cnt)) +
+  geom_line(color = "#008080") +
+  scale_x_date(limits = as.Date(c("2011-01-01", "2012-12-31"))) +
+  labs(y = "Count", title = "Bike Rental Counts") +
+  theme_minimal()
+```
+
+Now we can also delete the date variable, since we cannot use single instances as predictors in our models.
+
+```{r deletedtday}
+d.bikes$dteday <- NULL
+```
+
+### Distribution
+
+Next, since we are working with count data, we (correctly) expect the `cnt` variable to be strongly right-skewed. Hence, for working with `cnt` as a response variable in linear models (assuming normal distribution), we will need to log-transform it first.
+
+```{r histcnt, cache=TRUE}
+hist(d.bikes$cnt, main="Distribution of rented bikes", xlab = "cnt")
+```
+
+## Scatterplots {.tabset}
+
+In a next step we will plot the standardized continuous weather variables `atemp`, `hum` and `windspeed` against the log-transformed `cnt` to get a feel for the relationship. Additionally, we try to find the polynomial that fits the relationship best, adding an extra smooth line (red) and comparing it to the automatically generated one (blue).
+
+### Temperature
+
+```{r plotatempxcnt, cache=TRUE}
+# plot atemp against log-transformed cnt
+gg.obs.atemp <- ggplot(data=d.bikes, mapping=aes(x=atemp, y=log(cnt))) + geom_point() + geom_smooth()
+
+gg.obs.atemp + 
+  geom_smooth(method = "lm", 
+              formula = y ~ poly(x, degree = 4),
+              mapping = aes(y = log(cnt)),
+              se = FALSE,
+              color = "red") +
+  ggtitle("Felt temperature against count")
+
+```
+
+A polynomial of the fourth degree appears to fit best.
+
+### Humidity
+
+```{r plothumxcnt, cache=TRUE}
+# plot humidity against log-transformed cnt
+gg.obs.hum <- ggplot(data=d.bikes, mapping=aes(x=hum, y=log(cnt))) + geom_point() + geom_smooth()
+
+gg.obs.hum + 
+  geom_smooth(method = "lm", 
+              formula = y ~ poly(x, degree = 4),
+              mapping = aes(y = log(cnt)),
+              se = FALSE,
+              color = "red") +
+  ggtitle("Humidity against count")
+
+```
+
+A polynomial of the third or fourth degree appears to fit best.
+
+### Windspeed
+
+```{r plotwindxcnt, cache=TRUE}
+# plot windspeed against log-transformed cnt
+gg.obs.wind <- ggplot(data=d.bikes, mapping=aes(x=windspeed, y=log(cnt))) + 
+  geom_point() + 
+  geom_smooth()
+
+gg.obs.wind + 
+  geom_smooth(method = "lm", 
+              formula = y ~ poly(x, degree = 2),
+              mapping = aes(y = log(cnt)),
+              se = FALSE,
+              color = "red") +
+  ggtitle("Windspeed against count")
+
+```
+
+Here, a quadratic polynomial appears sufficient.
+
+## Boxplots {.tabset}
+
+Next, we will plot the categorical variables against log(`cnt`).
+
+### Weekday
+
+It can be summarized that the type of day (whether it is a holiday, a working day, or whichever weekday) does not appear to make a difference on the number of bikes rented.
+
+```{r cntxweekday}
+# bike count against weekday
+ggplot(d.bikes, aes(x = weekday, y = log(cnt))) +
+  geom_boxplot() +
+  ggtitle("Rental count against weekday")
+
+```
+
+### Workingday
+
+```{r cntxworkingday, cache=TRUE}
+# bike count against working day
+ggplot(d.bikes, aes(x = workingday, y = log(cnt))) +
+  geom_boxplot() +
+  ggtitle("Rental count against workingday")
+
+```
+
+### Holiday
+
+```{r cntxholiday, cache=TRUE}
+# bike count against holiday
+ggplot(d.bikes, aes(x = holiday, y = log(cnt))) +
+  geom_boxplot() +
+  ggtitle("Rental count against holiday")
+
+```
+
+### Weather Situation
+
+In contrast, bike rentals seem to be influenced by weather conditions (as was already visible above): the worse the weather (`weathersit`) gets, the less bikes are rented.
+
+```{r cntxweathersit, cache=TRUE}
+# bike count against weather situation
+ggplot(d.bikes, aes(x = weathersit, y = log(cnt))) +
+  geom_boxplot() +
+  ggtitle("Rental count against weather situation")
+
+```
+
+1 = Clear, Few clouds, Partly cloudy\
+2 = Mist + Cloudy, Mist + Broken clouds, Mist + Few clouds, Mist\
+3 = Light Snow, Light Rain + Thunderstorm + Scattered clouds, Light Rain + Scattered clouds\
+4 = Heavy Rain + Ice Pallets + Thunderstorm + Mist, Snow + Fog
+
+### Month
+
+The influence of weather can also be seen with seasons and months: counts increase in the first half of the year, peaking in summer, and decrease after again (quadratic relationship).
+
+```{r cntxmnth, cache=TRUE}
+# bike count against month
+ggplot(d.bikes, aes(x = mnth, y = log(cnt))) +
+  geom_boxplot() +
+  ggtitle("Rental count against month")
+
+```
+
+### Season
+
+```{r cntxseason, cache=TRUE}
+# bike count against season
+ggplot(d.bikes, aes(x = season, y = log(cnt))) +
+  geom_boxplot() +
+  ggtitle("Rental count against season")
+
+```
+
+### Year
+
+Lastly, bike sharing appears to have become more popular, as 2012 displays a higher average count of bike rentals than 2011.
+
+```{r cntxhr, cache=TRUE}
+# bike count against year
+ggplot(d.bikes, aes(x = yr, y = log(cnt))) +
+  geom_boxplot() +
+  ggtitle("Rental count against year")
+```
+
+## Interactions
+
+Lastly, based on domain knowledge from public transportation flows, we assume there to be an interaction between `hr` and `workingday` on the amount of bikes rented during a given hour of the day.
+
+```{r cntxhour, cache=TRUE}
+# rental count per hour and separated by workingday
+ggplot(d.bikes, aes(x = hr, y = log(cnt))) +
+  geom_point() +
+  geom_smooth(se=TRUE) +
+  ggtitle("Rental count against hour") +
+  facet_grid(. ~ workingday, labeller = labeller(workingday = c("0" = "Non-Working Day", "1" = "Working Day")))
+
+```
+
+------------------------------------------------------------------------
+
+# Modelling
+
+In our models, we will predict the variables `count`, `season`and \`\`workingday\`\`\`
+
+## Linear Model
+
+Lead: Luana Rossi
+
+Accurate `count` (amount of bikes rented) prediction enables the Xanadians to manage bike fleets efficiently, reducing instances of shortages or excessive, unused bikes. Additionally, it allows for dynamic resource allocation, directly influencing the maintenance schedule, bike lane optimization, and infrastructure planning. Our model aspires to strike a balance between availability and sustainability, creating a resilient bike-sharing system that not only serves Xanadu's residents but also cherishes its unique environmental landscape.
+
+As a first approach, we wanted to use a linear model to predict the amount of bikes rented. By log-transforming the response variable `cnt`, we relax the assumption of linearity. Further, to better capture the relationships discovered in the graphical analysis, we later also incorporate polynomials for the continuous variables.
+
+Fitting the linear model, we first fit a model including all predictors:
+
+::: {.fold .o}
+```{r fitcompleteLM_foldable, cache=TRUE}
+lm.d.bikes <- d.bikes
+
+# delete casual and registered variables, since they are a linear combination of cnt
+lm.d.bikes <- subset(lm.d.bikes, select = -c(casual, registered))
+
+# log-transform response variable cnt
+lm.d.bikes$cnt <- log(lm.d.bikes$cnt)
+
+# fit model using all remaining variables
+lm_complete <- lm(cnt ~ ., data = lm.d.bikes)
+summary(lm_complete)
+```
+:::
+
+While the summary shows many significant p-values (and a significant F-statistic, indicating that at least one parameter has an influence on count), we are likely to be overfitting, seen the great amount of predictors in our model.
+
+Hence, we use step-wise backward elimination of terms until we reach the best formula:
+
+::: {.fold .o}
+```{r eliminatetermsLM, cache=TRUE}
+# step-wise elimination
+lm_eliminated <- step(lm_complete, direction = "backward")
+
+summary(lm_eliminated)
+```
+:::
+
+```{r eliminateLM2, cache=TRUE}
+# see winning formula
+formula(lm_eliminated)
+
+# check presence of multi-collinearity
+vif(lm_eliminated)
+```
+
+There are two terms (`mnt` and `atemp`) present in our model with quite high GVIF values. It makes sense that month and felt temperatures correlate. However, since the GVIF values still are below the critical threshold we keep both variables in the model.
+
+Next, we will fit some more models. One new predictor we want to explore, too, are the different day times, since we have seen that `hr` follows a rather complicated pattern. By binning different hours into groups (e.g. night, or midday) we might produce a predictor with fewer levels but the same predictive power.
+
+```{r maketimes, cache=TRUE}
+# Create a new column "times" based on the values of "hr"
+lm.d.bikes$times <- ifelse(d.bikes$hr %in% c(1, 2, 3, 4, 5), "night",
+                        ifelse(d.bikes$hr %in% c(6, 7, 8), "rushhour1",
+                               ifelse(d.bikes$hr %in% c(9, 10, 11, 12, 13, 14, 15, 16), "midday",
+                                      ifelse(d.bikes$hr %in% c(17, 18, 19), "rushhour2",
+                                             ifelse(d.bikes$hr %in% c(20, 21, 22, 23, 0), "evening", NA)))))
+
+lm.d.bikes$times <- factor(lm.d.bikes$times)
+```
+
+As a next step, we fitted some more linear models (see hidden code) based on theoretical considerations, iteratively adapting them. All models contain exclusively predictors with significant p-values and have been tested regarding multi-collinearity (vif()) and the usefulness of interactions (drop1()).
+
+```{r fitlinearmodels, cache=TRUE, class.source = 'fold-hide'}
+# set up LM models
+lm.bikes.1 <- lm(cnt ~ atemp + hr:workingday + hum + windspeed, 
+                 data = lm.d.bikes)
+
+lm.bikes.2 <- lm(cnt ~ poly(atemp, degree=4) + poly(hr, degree=8):workingday + 
+                   poly(hum, degree = 4) + weathersit + poly(windspeed, degree=2), 
+                 data=lm.d.bikes)
+
+lm.bikes.3 <- lm(cnt ~ season + poly(hr, degree=8), data=lm.d.bikes)
+
+lm.bikes.4 <- lm(cnt ~ atemp + hum + windspeed + times:workingday + yr, data=lm.d.bikes)
+
+lm.bikes.5 <- lm(cnt ~ poly(atemp, degree=4) + poly(hum, degree=4) + poly(windspeed, degree=2) + yr, data=lm.d.bikes)
+
+lm.bikes.6 <- lm(cnt ~ workingday:poly(hr, degree=8) + yr + poly(atemp, degree=4), data=lm.d.bikes)
+
+lm.bikes.7 <- lm(cnt ~ poly(hr, df = 6), data = lm.d.bikes)
+
+lm.bikes.8 <- lm(cnt ~ workingday:poly(hr, degree=8) + yr + poly(atemp, degree=4) + poly(hum, degree=4) + poly(windspeed, degree=2), data=lm.d.bikes)
+
+lm.bikes.9 <- lm(cnt ~ workingday:poly(hr, degree=8) + yr + poly(atemp, degree=5) + poly(hum, degree=4) + poly(windspeed, degree=2), data=lm.d.bikes)
+
+lm.bikes.10 <- lm(cnt ~ yr + poly(hr, degree=8):workingday + holiday + weekday + weathersit + poly(atemp, degree=4) + poly(hum, 4) + poly(windspeed, 2), data=lm.d.bikes)
+
+lm.bikes.11 <- lm(cnt ~ workingday*times + season, data=lm.d.bikes)
+
+lm.bikes.12 <- lm(cnt ~ poly(atemp, degree=4) + poly(hum, degree=4) + poly(windspeed, degree=2) + times + yr, data=lm.d.bikes)
+
+```
+
+We will now check the predictive power of each model using cross-validation.
+
+```{r lmcorssvalidation, warning=FALSE, cache=TRUE}
+set.seed(123)
+
+# Set up list of models
+models <- list(lm.bikes.1, lm.bikes.2, lm.bikes.3, lm.bikes.4, lm.bikes.5, lm.bikes.6, lm.bikes.7, lm.bikes.8, lm.bikes.9, lm.bikes.10, lm.bikes.11, lm.bikes.12, lm_eliminated)  # List of defined models
+
+# list for storing correlation
+correlation <- numeric(length(models))
+
+# iterate over models
+for (i in seq_along(models)) {
+  model_formula <- formula(models[[i]])  # Get the formula of the specific model
+  
+  # cross-validate: perform train/test split 100 times
+  for (j in 1:100) {
+    index <- createDataPartition(lm.d.bikes$weathersit, p = 0.8, list = FALSE)
+    lm.d.bikes.train <- lm.d.bikes[index, ]  # Training set
+    lm.d.bikes.test <- lm.d.bikes[-index, ]  # Test set
+    
+    # Fit the model using the training data
+    lm_model_train <- lm(model_formula, data = lm.d.bikes.train) 
+    
+    # Make predictions on the test data
+    lm_predicted_test <- predict(lm_model_train, newdata = lm.d.bikes.test)
+    
+    # save correlation
+    correlation[j] <- cor(lm_predicted_test, lm.d.bikes.test$cnt)^2
+  }
+  
+  # calculate R^2 
+  mean_correlation <- mean(correlation)
+  print(paste("Model", i, "Mean Correlation:", mean_correlation))
+  
+  # Plot actual against predcited values (only for best model)
+  if (i == 10) {
+    # Plot for model number 10
+    plot(lm.d.bikes.test$cnt, lm_predicted_test, main = paste("Linear Model", i, "- Predicted vs Actual Values"))
+  }
+
+}
+```
+
+Cross-validation shows that model 10 has the highest R\^2 with mean correlation of 0.8997. Hence we will test assumptions on this model and interpret its coefficients.
+
+### Assumption Testing {.tabset}
+
+Assumption tests show that most assumptions are given. One assumption that is - not surprisingly - violated is the assumption of there being no autocorrelation present. Rather, the autocorrelation is quite high, with 0.49. This is not surprising as the data at hand is time-series data. While a really high R\^2 resulted with this model, it should be considered using a time series model like (S)ARIMA to deal with the present autocorrelation. Additionally, there is also some homoscedastic behaviour visible, with corresponding plots showing slight patterns.
+
+#### 1. Normality
+
+```{r assumption1, cache=TRUE}
+# Residual Analysis
+residuals <- residuals(lm.bikes.10)
+
+# 1. Normality of Residuals
+hist(residuals, main = "Normality of residuals")
+
+# Q-Q Plot for visual inspection
+qqnorm(residuals, main = "QQ-Plot")
+qqline(residuals)
+```
+
+#### 2. Linearity
+
+```{r assumption2, cache=TRUE}
+# 2. Linearity of Residuals: residuals vs. fitted values
+plot(fitted(lm.bikes.10), residuals, main = "Linearity of residuals")
+```
+
+#### 3. Homoscedasticity
+
+```{r assumption3}
+# 3. Homoscedasticity of Residuals
+plot(lm.d.bikes$yr, residuals, main="Residuals of yr")
+plot(lm.d.bikes$hr, residuals, main="Residuals of hr")
+plot(lm.d.bikes$workingday, residuals, main="Residuals of workingday")
+plot(lm.d.bikes$holiday, residuals, main="Residuals of holiday")
+plot(lm.d.bikes$weekday, residuals, main="Residuals of weekday")
+plot(lm.d.bikes$weathersit, residuals, main="Residuals of weathersit")
+plot(lm.d.bikes$atemp, residuals, main="Residuals of atemp")
+plot(lm.d.bikes$hum, residuals, main="Residuals of hum")
+plot(lm.d.bikes$windspeed, residuals, main="Residuals of windspeed")
+```
+
+#### 4. Independence
+
+```{r assumption4, cache=TRUE}
+# 4. Independence of Residuals: Durbin-Watson Test
+car::durbinWatsonTest(lm.bikes.10)
+```
+
+#### 5. Multicollinearity
+
+```{r assumption5, cache=TRUE}
+# 5. Multicollinearity among Predictors: VIF
+vif(lm.bikes.10)
+```
+
+#### 6. Outliers
+
+```{r assumption6, cache=TRUE}
+# 6. Outliers: Cook's Distance
+plot(lm.bikes.8, which = 4)
+```
+
+### Interpretation
+
+Either way, we will interpret the results from the model. However, results must be interpreted with caution, given the violations of certain assumptions.
+
+::: {.fold .o}
+```{r summarybestLM}
+summary(lm.bikes.10)
+```
+:::
+
+The model summary shows that, when all predictors are held constant, the expected count of rented bikes is around `r round(exp(4.365118), 2)`.
+
+Compared to the reference **year** (2011), the bike count is estimated to be about `r round(exp(0.442048), 2)` times higher in the year 2012.
+
+On average, during **holidays**, the bike count is estimated to be about `r round(exp(-0.121612), 2)` times lower compared to non-holiday days.
+
+There is mild to strong evidence that each **weekday** has a different impact on the bike count compared to the reference level Sunday. For example, Mondays have an estimated bike count about `r round(exp(-0.050081), 2)` times lower than Sundays, while Fridays and Saturdays have higher estimated bike counts by a factor of `r round(exp(0.121715), 2)` and `r round(exp(0.109464), 2)`, respectively. Only for Thursday there is no evidence (p\>0.05) that its bike count differs relative to Sunday.
+
+There is strong evidence that different **weather situations** affect people's willingness to rent a bike. Mist and clouds (weathersit2) have a slightly negative impact on bike rentals compared to clear weather (about `r round(exp(-0.073863), 2)` times lower). Light snow or rain (weathersit3) already shows a stronger negative impact (about `r round(exp(-0.543310), 2)` times lower), and heavy rain, snow, or fog (weathersit4) have an even greater negative impact (about `r round(exp(-0.663526), 2)` times lower) compared to clear weather (weathersit1, the reference weather situation).
+
+Regarding the influence of felt temperature, humidity and windspeed it is hard to give an estimate, since these variables were included as higher-degree polynomials. Hence, while they certainly attributed to the high R squared value, it is hard to say what influence an in- or decrease in the respective units has on the number of bikes rented.
+
+(Note that the coefficients in the interpretation section above were transformed inline with exp(), effectively reverting the log-transformed data back to count data, to make interpretation more intuitive.)
+
+------------------------------------------------------------------------
+
+## GLM with Poisson
+
+Lead: Nick Schneeberger
+
+### Goal and First Model
+
+Our primary objective is to develop a predictive model that can accurately estimate the number of bicyclists (`cnt` as our response variable) based on various influential factors.
+
+We start with using all available factors from our cleaned dataframe for our first model.
+
+::: {.fold .o}
+```{r, cache=TRUE}
+glm.bikes.0 <- glm(cnt ~ . , family = "poisson", data = d.bikes)
+summary(glm.bikes.0)
+```
+:::
+
+### Removing Perfect Correlations
+
+As you may see the summary contained some NA variables. Variables which are NA are linear combinations of each other, meaning they correlate perfectly. We need to remove them from the model before proceeding.
+
+-   `month:` Some levels (MAY, AUG, NOV) of `mnth` are NA. We have to remove them. While we're at it, we assume, that in the winter months, people rent less bikes because it's colder / the weather is worse and not because it's their least favorite month. We remove `mnth` as a factor altogether, making our model simpler.
+
+-   `workingday`: We need to remove the factor `workingday` because it's NA and therefore correlates perfectly with another variable.
+
+-   `casual` and `registered`: We remove casual and registered counts because they are part of our response variable. We recall: `cnt` = `casual` + `registered`
+
+::: {.fold .o}
+```{r, cache=TRUE}
+glm.bikes.1 <- glm(cnt ~ . -mnth -workingday -casual -registered, family = "poisson", data = d.bikes)
+summary(glm.bikes.1)
+```
+:::
+
+### Check Correlations
+
+Now we can check the correlations using the *vif* function from the *car* library.
+
+```{r}
+vif(glm.bikes.1)
+```
+
+In general, a VIF (Variance Inflation Factor) of 1 indicates no correlation between the predictor and the other variables, while a VIF between 1 and 5 suggests moderate correlation. A VIF greater than 5 or 10 is often considered to indicate high multicollinearity.
+
+Based on these VIF values, it seems that multicollinearity is not a major concern in this model. We may proceed, saving our model in an updated variable without changing anything.
+
+```{r, cache=TRUE}
+glm.bikes.2 <- glm.bikes.1
+```
+
+### Check for Non-Linearities
+
+Until now we assumed that all our factors behaved linearly. As we know from the scatterplots from our graphical-analysis, this is not always the case.
+
+#### Investigating the Felt Temperature
+
+We already know from the scatterplot that a polynomial of fourth degree would fit atemp best. However, we want to test if the use of such a high polynomial in our model would be justified.
+
+In order to test that, we compare the original model to the model with the quadratic term using ANOVA (Analysis of Variance). And then we compare the quadratic model to the cubic model and this one to a model of fourth degree.
+
+```{r, cache=TRUE}
+# Include a quadratic term
+glm.bikes.2.atemp.quadratic <- update(glm.bikes.2, . ~ . + I(atemp^2))
+
+glm.bikes.2.atemp.cubic <- update(glm.bikes.2, . ~ . + I(atemp^2) + I(atemp^3))
+
+glm.bikes.2.atemp.dim4 <- update(glm.bikes.2, . ~ . + I(atemp^2) + I(atemp^3) + I(atemp^4))
+
+# Compare the original model to the model with the quadratic term
+anova(glm.bikes.2, glm.bikes.2.atemp.quadratic)
+
+# Compare quadratic model to the model with the cubic term
+anova(glm.bikes.2.atemp.quadratic, glm.bikes.2.atemp.cubic)
+
+# Compare cubic model to the model with the fourth polynomial
+anova(glm.bikes.2.atemp.cubic, glm.bikes.2.atemp.dim4)
+
+```
+
+In this output we're mainly interested in the deviance. It seems that the inclusion of the quadratic term has a big effect on the deviance. The cubic and 4.-polynomial model then has not such a big influence. To not overfit we take the quadratic model.
+
+We do the same analysis for our other integer variables `humidity` and `windspeed`.
+
+Our ANOVA test (not displayed here) concludes that it is not justified to use a bigger dimension than linear for \`hum`and`windspeed\`\`. Again, we don't want to overfit our model.
+
+#### Updating the Model
+
+We're refining our model by introducing the quadratic term for 'atemp' to capture possible non-linearities.
+
+Simultaneously, we're building a comprehensive model with optimized parameter dimensions, though it risks overfitting due to its complexity.
+
+Finally, we will print a summary. All our factors have a very small p-value. This is good.
+
+::: {.fold .o}
+```{r, cache=TRUE}
+glm.bikes.3 <- update(glm.bikes.2, . ~ . -atemp + poly(atemp, Degree=2))
+
+glm.bikes.4 <- update(glm.bikes.2, . ~ . -atemp + poly(atemp, Degree=4) -windspeed +poly(windspeed, Degree=2) -hum + poly(hum, Degree=4))
+
+summary(glm.bikes.3)
+```
+:::
+
+### Predict
+
+#### Predict using a single split
+
+First we split our data in train and test data using a single split.
+
+```{r message=FALSE, warning=FALSE, cache=TRUE}
+# Split data into a training set and a test set.
+
+set.seed(123)  # For reproducibility
+trainIndex <- createDataPartition(d.bikes$cnt, p = .7, list = FALSE)
+trainData <- d.bikes[ trainIndex,]
+testData  <- d.bikes[-trainIndex,]
+
+```
+
+Then we re-fit the model only on the training data.
+
+```{r, cache=TRUE}
+# Now, re-fit the model on the training data:
+glm.bikes.3.train <- glm(formula = cnt ~ season + yr + hr + holiday + weekday + 
+    weathersit + hum + windspeed + poly(atemp, Degree=2), 
+    family = "poisson", data = trainData)
+
+```
+
+Now we make predictions (juicy!):
+
+```{r, cache=TRUE}
+# Now that the model has been trained on the training data, we can use it to make predictions on the test data.
+predictions <- predict(glm.bikes.3.train, newdata = testData, type = "response")
+
+```
+
+To see how good or bad our predictions are, we calculate the RMSE (Root Mean Square Error)
+
+```{r, cache=TRUE}
+RMSE <- sqrt(mean((testData$cnt - predictions)^2))
+print(RMSE)
+```
+
+Because we have no idea if this RMSE is high or low, we compare it to a naive model.
+
+Our naive model can predict the mean of `cnt` from the training data for all observations in the test data:
+
+```{r, cache=TRUE}
+# Predict the mean of 'cnt' from the training data for all observations in the test data
+naive_predictions <- rep(mean(trainData$cnt), nrow(testData))
+
+# Compute RMSE for the naive model
+naive_RMSE <- sqrt(mean((testData$cnt - naive_predictions)^2))
+print(naive_RMSE)
+```
+
+So with our very-smart-model the RMSE is smaller than with the naive model! Not bad!! We're very happy.
+
+Also I played around with the model a bit. With removing arbitrary parameters I often made the model much worse, but sometimes it didn't change much. It is quite safe to assume that this model is good and holds well.
+
+**Or have we just gotten lucky?**
+
+#### Crossvalidation
+
+To exclude that we just got lucky, we now make 100 splits and see if our model still holds. The code snippet below is more or less copied from the CrossValidation Lab, thus not further commented.
+
+```{r, cache=TRUE}
+set.seed(121)
+RMSE_naive <- c()
+RMSE_complex_3 <- c()
+RMSE_complex_4 <- c()
+
+# Remove the rare weathersit=4 observations
+d.bikes <- d.bikes[d.bikes$weathersit != 4,]
+
+for(i in 1:100){
+  ## 1) prepare data
+  trainIndex <- sample(x = c(TRUE, FALSE), size = nrow(d.bikes), replace = TRUE)
+  trainData <- d.bikes[ trainIndex,]
+  testData  <- d.bikes[-trainIndex,]
+
+  ## Naive model
+  ## 2) predict the mean of 'cnt' from the training data for all observations in the test data
+  naive_predictions <- rep(mean(trainData$cnt), nrow(testData))
+  ## 3) compute RMSE
+  RMSE_naive[i] <- sqrt(mean((testData$cnt - naive_predictions)^2))
+  
+  ## Complex model 3
+  ## 2) fit the model with "train" data
+  glm.bikes.3.train <- glm(formula = cnt ~ season + yr + hr + holiday + weekday + 
+                            weathersit + hum + windspeed + poly(atemp, Degree=2), 
+                            family = "poisson", data = trainData)
+  
+  ## 3) make prediction on the test data
+  predictions_3 <- predict(glm.bikes.3.train, newdata = testData, type = "response")
+  
+  ## 4) compute RMSE
+  RMSE_complex_3[i] <- sqrt(mean((testData$cnt - predictions_3)^2))
+
+  ## Complex model 4
+  glm.bikes.4.train <- glm(formula = cnt ~ season + yr + hr + holiday + weekday + 
+                            weathersit + poly(atemp, Degree=2) + poly(windspeed, Degree=2) + poly(hum, Degree=4), 
+                            family = "poisson", data = trainData)
+  
+  ## 3) make prediction on the test data
+  predictions_4 <- predict(glm.bikes.4.train, newdata = testData, type = "response")
+  
+  ## 4) compute RMSE
+  RMSE_complex_4[i] <- sqrt(mean((testData$cnt - predictions_4)^2))
+}
+
+## Mean RMSE for naive, complex_3 and complex_4 models
+mean(RMSE_naive)
+mean(RMSE_complex_3)
+mean(RMSE_complex_4)
+
+```
+
+------------------------------------------------------------------------
+
+We see that our simple model performs slightly better than the complex model. So we can assume to have made the right choice.
+
+## GLM with Binomial
+
+Lead: Luca Himmelein
+
+Research Question:\
+**Does the bike rentals and weather situation indicates the likelihood of a day being a workday? Is there a significant association between the bike rentals and weather situation and the occurrence of workdays?**
+
+Xanadu boasts a distinct work culture, one that gives its inhabitants the liberty to choose when and how often they work. While this freedom enhances work-life balance, it also introduces variability into daily commuting patterns.
+
+Hence, the ability to predict working days becomes crucial for optimizing the bike-sharing system. By analyzing Earth's bike-sharing data, we aim to discern patterns and trends that could aid in predicting the flow of bike ridership on any given Xanadian day.
+
+Concretely, this research question aims to investigate the relationship between the number of rentals, weather conditions, and the likelihood of a day being classified as a working day. By modeling a GLM with a binomial family and using "workingday" as the binary response variable, we can assess the impact of rental counts and weather conditions on the probability of a day being a working day.
+
+```{r, cache=TRUE}
+# Filter out the rows with weathersit level 4
+filtered_data <- d.bikes[d.bikes$weathersit %in% c(1, 2, 3), ]
+
+# Fit the GLM model on the filtered data
+glm_model <- glm(workingday ~ cnt + weathersit, family = binomial, data = filtered_data)
+
+# Print the model summary
+summary(glm_model)
+
+# Assuming "workingday" is a factor variable in your dataset
+factor_distribution <- table(filtered_data$workingday)
+
+# Print the factor distribution
+print(factor_distribution)
+
+# Split the data into training and test sets
+set.seed(123)  # for reproducibility
+train_indices <- sample(1:nrow(filtered_data), size = round(0.7 * nrow(filtered_data)), replace = FALSE)
+train_data <- filtered_data[train_indices, ]
+test_data <- filtered_data[-train_indices, ]
+
+# Make predictions on the test set
+test_predictions <- predict(glm_model, newdata = test_data, type = "response")
+test_predictions_binary <- ifelse(test_predictions >= 0.5, 1, 0)
+
+# Create the confusion matrix
+confusion_matrix <- table(Actual = test_data$workingday, Predicted = test_predictions_binary)
+print(confusion_matrix)
+
+```
+
+### **Interpretation**
+
+The significance codes indicate the level of statistical significance for each coefficient. In this case, all variables (`cnt`, weathersit2, and weathersit3) are highly significant (p \< 0.001), suggesting that they have a significant impact on the likelihood of the working day being assigned to the majority class.
+
+The null deviance and residual deviance provide information about the goodness-of-fit of the model. A lower residual deviance compared to the null deviance suggests that the model is providing a better fit to the data.
+
+Overall, this summary indicates that the count of total rentals (cnt) and weather situation (`weathersit`) are important predictors in determining the likelihood of the working day being assigned to the majority class.
+
+The model performed well in predicting the majority class (1) with a relatively high number of true positives. However, it struggled in correctly predicting the minority class (0), as evidenced by the high number of false positives and zero true negatives. This suggests that the model may have a bias towards predicting the majority class and needs further improvement to effectively capture the minority class.
+
+------------------------------------------------------------------------
+
+## General Additive Model (GAM)
+
+Lead: Luca Himmelein
+
+**How do weather conditions (`weathersit`), temperature (`atemp`), humidity (`hum`), windspeed, and hour of the day (`hr`) affect the number of bike rentals (`cnt`) in a given time period?**
+
+```{r, cache=TRUE}
+#Splitting in Training and Testing sets
+# Set the seed for reproducibility
+set.seed(123)
+
+# Splitting the dataset into training and testing sets
+train_indices <- createDataPartition(d.bikes$cnt, p = 0.7, list = FALSE)
+train_data <- d.bikes[train_indices, ]
+test_data <- d.bikes[-train_indices, ]
+
+# Select numeric variables from d.bikes
+numeric_vars <- d.bikes[, sapply(d.bikes, is.numeric)]
+
+# Calculate correlation matrix
+cor_matrix <- cor(numeric_vars)
+print(cor_matrix)
+
+# GAM Model
+gam_model <- gam(cnt ~ s(weathersit, bs = "fs") + s(atemp) + s(hum) + s(windspeed) + s(hr),
+                 data = d.bikes, family = gaussian)
+
+# Print the summary of the GAM model
+summary(gam_model)
+
+predictions <- predict(gam_model)
+rmse <- sqrt(mean((log(d.bikes$cnt) - predictions)^2))
+print(rmse)
+
+# Print the R-squared and adjusted R-squared
+cat("R-squared:", summary(gam_model)$r.sq, "\n")
+
+# Print the AIC and BIC
+cat("AIC:", AIC(gam_model), "\n")
+cat("BIC:", BIC(gam_model), "\n")
+```
+
+Additional GAM models are created by varying the polynomial degrees for the atemp predictor. These models (gam_model2, gam_model3, gam_model4) are then compared using ANOVA (analysis of variance) to assess their relative performance based on deviance values.
+
+```{r, cache=TRUE}
+# Create the GAM models with different polynomial degrees for atemp
+gam_model2 <- gam(cnt ~ s(weathersit, bs = "fs") + s(atemp, bs = "cr", k = 2) + s(hum) + s(windspeed) + s(hr),
+                  data = d.bikes, family = gaussian)
+
+gam_model3 <- gam(cnt ~ s(weathersit, bs = "fs") + s(atemp, bs = "cr", k = 3) + s(hum) + s(windspeed) + s(hr),
+                  data = d.bikes, family = gaussian)
+gam_model4 <- gam(cnt ~ s(weathersit, bs = "fs") + s(atemp, bs = "cr", k = 4) + s(hum) + s(windspeed) + s(hr),
+                  data = d.bikes, family = gaussian)
+
+# Perform ANOVA to compare the models
+anova_results <- anova(gam_model, gam_model2, gam_model3, gam_model4)
+print(anova_results)
+
+
+### Predictions
+
+set.seed(123)  # For reproducibility
+trainIndex <- createDataPartition(d.bikes$cnt, p = .7, list = FALSE)
+trainData <- d.bikes[ trainIndex,]
+testData  <- d.bikes[-trainIndex,]
+
+gam_model <- gam(cnt ~ s(weathersit, bs = "fs") + s(atemp) + s(hum) + s(windspeed) + s(hr),
+                 data = trainData, family = gaussian)
+
+# Make predictions on the test data
+predictions <- predict(gam_model, newdata = test_data, type = "response")
+
+
+RMSE <- sqrt(mean((testData$cnt - predictions)^2))
+print(RMSE)
+```
+
+The GAM model provides an overview of the relationship between the predictors (`weathersit`, `atemp`, `hum`, `windspeed`, `hr`) and the target variable (`cnt`).
+
+The significance of the smooth terms suggests that there are non-linear relationships between the predictors and the target variable.
+
+The adjusted R-squared value of 0.588 indicates that the model explains approximately 58.8% of the variance in the target variable.
+
+The AIC (Akaike Information Criterion) and BIC (Bayesian Information Criterion) values are reported as measures of model fit. Lower values indicate better model fit, considering the complexity of the model.
+
+The RMSE provides an estimate of the average prediction error of the model, with a value of 230.706 when evaluated on the entire dataset and 116.3062 when evaluated on the test data.
+
+------------------------------------------------------------------------
+
+## SVM
+
+Lead: Nick Schneeberger
+
+Due to the erratic nature of Xanadu's climate, the ICDP is interested in studying Earth's bike-sharing data to build a machine learning model capable of predicting `season` changes in order to be able to understand how bike ridership varies with different seasons.
+
+This model will be useful to the Xanadians in a multitude of ways: They can preemptively adjust the bike-sharing system's availability and maintenance schedule based on these predictions. Moreover, this data will aid the ICPD in the strategic planning and design of bike lanes and cycling infrastructure to match Xanadu's unique seasons, ensuring the system's optimal utilization and longevity.
+
+To achieve this categorization, we use a support vector machine.
+
+### Prediction
+
+```{r, cache=TRUE}
+set.seed(123)  # for reproducibility
+
+trainIndex <- sample(1:nrow(d.bikes), 0.9*nrow(d.bikes))
+train_set <- d.bikes[trainIndex,]
+test_set <- d.bikes[-trainIndex,]
+
+
+# Train the model on the training data
+svm_model <- svm(season~atemp+hum+windspeed+cnt+hr, data = train_set, scale = TRUE, kernel="linear")
+
+# Predict on the test data
+predictions <- predict(svm_model, test_set)
+
+# Check accuracy
+table(pred = predictions, true = test_set$season)
+
+# Creating the confusion matrix
+confusion_matrix <- table(pred = predictions, true = test_set$season)
+
+# Calculate accuracy
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+
+# Print the accuracy
+print(accuracy)
+
+```
+
+The accuracy from the confusion matrix is not bad for a first fit.
+
+### Plotting SVM
+
+To further investigate and check out what an SVM can do and how it works, we draw a plot where we check how the SVM categorizes humidity and felt temperature in a graph.
+
+```{r, cache=TRUE}
+
+# Train SVM model on two features
+svm_model_2d <- svm(season ~ atemp + hum, data = train_set, kernel = "linear")
+
+# Plot decision boundary
+plot(svm_model_2d, train_set, atemp ~ hum)
+
+```
+
+### Tuning
+
+We will now look for the best cost value to improve the accuracy of our model. This process is called tuning. Because this model takes forever to compute, we pick from an arbitrary list of cost paramters instead of e.g. checking all costs from 1 to 1000. So we can get an approximation.
+
+```{r hugechunk, eval=TRUE, cache=TRUE}
+# Define training and test set
+trainIndex <- sample(1:nrow(d.bikes), 0.7 * nrow(d.bikes))
+train_set <- d.bikes[trainIndex,]
+test_set <- d.bikes[-trainIndex,]
+
+# Define the specific cost values to try
+cost_values <- c(1, 5, 10, 15, 20, 50, 100, 200)
+
+# Perform hyperparameter tuning with cross-validation
+tuned_results <- tune(
+  svm,
+  season ~ atemp + hum + windspeed + cnt + hr,
+  data = train_set,
+  kernel = "radial",
+  scale = TRUE,
+  ranges = list(cost = cost_values),
+  cross = 10
+)
+
+# Print the best model
+print(tuned_results$best.model)
+
+# Print the best performance
+print(tuned_results$best.performance)
+
+# Use the best model to make predictions on the test data
+best_model <- tuned_results$best.model
+predictions <- predict(best_model, test_set)
+
+# Check accuracy
+table(pred = predictions, true = test_set$season)
+
+```
+
+Tuning the cost parameter did not result in any success. The best-performing model achieved an accuracy of approximately 35%, which is lower than the initial model. We have to assume the 'best-performing' model with cost 20 is overfit. 
+
+For this reason it might be worth to explore other methods of improving the SVM-model, such as feature engineering, trying different kernels, or using a different model altogether. 
+
+------------------------------------------------------------------------
+
+## Neural Network
+
+Lead: Luana Rossi
+
+Having gone through all kinds of different approaches of various complexities, trying to make predictions what moves people (in the literal sense of the word), we will now hand this task over to a neural network. Could it all just have been left to an artificial brain instead?
+
+### ANN Set-Up
+
+In a first step we make our data frame fit for training with a neural network. Concretely, we first dummy-code all factors, and then transform them to numeric data types.
+
+```{r anndatasetup, cache=TRUE, warning=FALSE}
+# create new dataframe
+ann.d.bikes <- d.bikes
+
+# turn hour into factor
+ann.d.bikes$hr <- factor(ann.d.bikes$hr)
+
+# Dummy-encode categorical variables and update columns in ann.d.bikes
+categorical_vars <- c("yr", "hr", "mnth", "weathersit", "workingday", "weekday", "holiday", "season")
+dummy_encoded <- model.matrix(~ . - 1, data = ann.d.bikes[, categorical_vars])
+ann.d.bikes[, categorical_vars] <- dummy_encoded
+
+# Log-transform response variable cnt
+ann.d.bikes$cnt <- log(as.numeric(ann.d.bikes$cnt))
+```
+
+### Prepare for Training
+
+Next, we perform a train/test-split and define the variables we want to include as predictors. It must be said that for some reason, the network has some antipathy against continuous variables and refuses to run, which is why sadly, the params `atemp`, `hum` and `windspeed` were not included in the model.
+
+```{r neuralnet, cache=TRUE}
+set.seed(123)  # Set a seed for reproducibility
+
+# Split the data into training and test sets (90:10)
+train_indices <- createDataPartition(ann.d.bikes$cnt, p = 0.9, list = FALSE)
+train <- ann.d.bikes[train_indices, ]
+test <- ann.d.bikes[-train_indices, ]
+
+# Define the model formula with previously log-transformed cnt
+formula <- cnt ~ hr + workingday + weathersit + yr + weekday + holiday + mnth + season
+```
+
+## Train the Neural Network
+
+As a next step, we set the scene for cross-validation and define the parameters for grid search and tuning. We have tried a great many of combinations via grid search, using also less or more tuning parameters, but it does not seem to make a difference. So the choice of the grid is ultimately quite arbitrary. However, there is no rule or guideline to how to choose the parameters, hence it is difficult to establish which grid size to use. Additionally, we chose quite high values for learning rate and maximum steps, since otherwise the model would not converge, indicating that there might be quite a complex underlying relationship.
+
+Once the parameters and methods are set, we can start training our neural network.
+
+```{r trainann, cache=TRUE}
+# Create the training control object for 5-fold cross-validation
+ctrl <- trainControl(method = "cv", number = 5)
+
+# Define the grid of layer sizes to search
+grid <- expand.grid(layer1=c(5, 7), layer2=c(3, 4), layer3=c(2, 3))
+
+# Train the neural network model with grid search
+bikes_net <- train(formula, data = train, method = "neuralnet", 
+                   trControl = ctrl, 
+                   tuneGrid = grid,
+                   linear.output = TRUE, 
+                   learningrate = 0.1, stepmax = 50^3)
+```
+
+### Resulting Neural Network
+
+```{r plotneuralnetwork, cache=TRUE}
+plot(bikes_net$finalModel)
+```
+
+### Predict Test Data
+
+Now that we have trained the neural network, we can put it to the test and let it predict some values, also plotting the results.
+
+```{r predictann, cache=TRUE}
+# Make predictions on the test data
+predicted_values <- predict(bikes_net, newdata = test)
+
+# Plot the predicted values against the real values
+plot(test$cnt, predicted_values, col = 'blue', pch = 16,
+     ylab = "Predicted log(cnt)", xlab = "Real log(cnt)")
+abline(0, 1)
+```
+
+### Evaluate Model Performance
+
+The plot above already shows quite clearly that the neural network doesn't manage to find the underlying pattern well. Just to see how bad the model actually (and consistently, no matter the tuning) performs, we will also generate some model performance values.
+
+```{r annmodelperformance, cache=TRUE}
+# Calculate RMSE
+rmse <- sqrt(mean((test$cnt - predicted_values)^2))
+print(rmse)
+
+# Calculate MAE
+mae <- mean(abs(test$cnt - predicted_values))
+print(mae)
+
+# Calculate R-squared
+r_squared <- R2(pred = predicted_values, obs = test$cnt)
+print(r_squared)
+```
+
+Seen that `cnt` is log-transformed, an RMSE of 0.91 and a MAE of 0.7 are quite high error rates. Only 61.63% in `cnt` can be predicted by the neural network at hand - which is especially compared to the previous models a rather underwhelming result. We can only speculate that the lack of the three continuous weather variables must lead to a significantly worse performance of the overall model.
+
+# The Dawn of a New Era on Xanadu
+
+As we continue to pedal forward on this interstellar endeavor, Fahrradinand Sternfahrer, Chief Officer of Xenotransportational Infrastructure and Planetary Cyclo-Urbanism, expresses profound satisfaction and optimism. Sternfahrer lauds the progress made so far and is deeply grateful for the dedicated efforts of Nick, Luana, and Luca, who have seamlessly bridged the vast expanse between two worlds through their expert understanding and passion for cycling. The triumphant synergy between Earth's cycling emissaries and the Intergalactic City Planning Department has proven invaluable, shining a beacon of success on this pioneering mission.
+
+**As we move forward, each rotation of a bike wheel, every commuter journey, will be a nod to this remarkable collaboration that started it all.** - *Fahrradinand Sternfahrer*
+
+```{=html}
+<script> 
+
+$(document).ready(function() {
+
+  console.log("Hello World!");
+
+  $chunks = $('.fold');
+
+  $chunks.each(function () {
+
+    // add button to source code chunks
+    if ( $(this).hasClass('s') ) {
+      $('pre.r', this).prepend("<div class=\"showopt\">Show Source</div><br style=\"line-height:22px;\"/>");
+      $('pre.r', this).children('code').attr('class', 'folded');
+    }
+
+    // add button to output chunks
+    if ( $(this).hasClass('o') ) {
+      $('pre:not(.r)', this).has('code').prepend("<div class=\"showopt\">Show Output</div><br style=\"line-height:22px;\"/>");
+      $('pre:not(.r)', this).children('code:not(r)').addClass('folded');
+
+      // add button to plots
+      $(this).find('img').wrap('<pre class=\"plot\"></pre>');
+      $('pre.plot', this).prepend("<div class=\"showopt\">Show Plot</div><br style=\"line-height:22px;\"/>");
+      $('pre.plot', this).children('img').addClass('folded');
+
+    }
+  });
+
+  // hide all chunks when document is loaded
+  $('.folded').css('display', 'none')
+
+  // function to toggle the visibility
+  $('.showopt').click(function() {
+    var label = $(this).html();
+    if (label.indexOf("Show") >= 0) {
+      $(this).html(label.replace("Show", "Hide"));
+    } else {
+      $(this).html(label.replace("Hide", "Show"));
+    }
+    $(this).siblings('code, img').slideToggle('fast', 'swing');
+  });
+});
+
+
+</script>
+```
+```{=html}
+<style>
+
+.showopt {
+  background-color: white;
+  color: #E15214; 
+  width: 100px;
+  text-align: center;
+  float: left;
+  font-family: sans-serif;
+  transition: background-color 0.3s ease, color 0.3s ease; /* Smooth transition */
+  cursor: pointer;
+}
+
+.showopt:hover {
+    background-color: #F6F6F6;
+    color: #9F3A0E;
+    cursor: pointer;
+    transition: background-color 0.3s ease, color 0.3s ease; /* Smooth transition */
+}
+
+pre.plot {
+  background-color: white !important;
+}
+
+
+</style>
+```
